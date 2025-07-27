@@ -78,7 +78,6 @@ pub fn parse(comptime OptStruct: type, allocator: Allocator, tmp_allocator: Allo
 
     while (arg_it.next()) |arg| {
         var token = arg;
-        var field_index_opt: ?usize = 0;
 
         const field_name: []const u8 = blk: {
             if (std.mem.startsWith(u8, token, "--")) {
@@ -106,10 +105,10 @@ pub fn parse(comptime OptStruct: type, allocator: Allocator, tmp_allocator: Allo
                 }
 
                 var field_name: ?[]const u8 = null;
+                // TODO: Move this to the top of the loop below?
                 inline for (@field(result, "__short_names"), 0..) |n, i| {
                     if (short_name == n) {
                         field_name = fields[i].name;
-                        field_index_opt = i;
                         break;
                     }
                 }
@@ -125,46 +124,47 @@ pub fn parse(comptime OptStruct: type, allocator: Allocator, tmp_allocator: Allo
             unreachable;
         };
 
-        if (field_index_opt == null) {
-            var found = false;
-            inline for (fields[0 .. fields.len - 1], 0..) |field, i| {
-                if (std.mem.eql(u8, field_name, field.name)) {
-                    field_index_opt = i;
-                    found = true;
-                    break;
+        var found = false;
+        inline for (fields[0 .. fields.len - 1]) |field| {
+            if (std.mem.eql(u8, field_name, field.name)) {
+                const field_type_info = @typeInfo(field.type);
+                log.debug("Field name: '{s}' - '{s}'", .{ field_name, field.name });
+
+                var invert_boolean = false;
+
+                // handle ' value', ' =value', ' = value'
+                blk: {
+                    if (token.len == 0) {
+                        if (arg_it.next()) |n| {
+                            token = n;
+                        } else if (field_type_info == .bool) {
+                            invert_boolean = true;
+                            break :blk;
+                        } else {
+                            log.err("Expected value after option '{s}'", .{field_name});
+                            return error.ExpectedValue;
+                        }
+
+                        // handle ' =value', ' = value'
+                        if (std.mem.startsWith(u8, token, "=")) {
+                            token = token[1..];
+                        }
+
+                        // handle 'name = value'
+                        if (token.len == 0) {
+                            token = arg_it.next() orelse {
+                                log.err("Expected value after option '{s}'", .{field_name});
+                                return error.ExpectedValue;
+                            };
+                        }
+                    }
                 }
-            }
-            if (!found) {
-                log.err("Invalid option name '{s}'", .{field_name});
-                return error.InvalidOptionName;
-            }
-        }
 
-        // handle 'name =value', 'name= value', 'name = value'
-        if (token.len == 0) {
-            token = arg_it.next() orelse {
-                log.err("Expected value after option '{s}'", .{field_name});
-                return error.ExpectedValue;
-            };
-
-            if (std.mem.startsWith(u8, token, "=")) {
-                token = token[1..];
-            }
-
-            // handle 'name = value'
-            if (token.len == 0) {
-                token = arg_it.next() orelse {
-                    log.err("Expected value after option '{s}'", .{field_name});
-                    return error.ExpectedValue;
-                };
-            }
-        }
-
-        inline for (fields[0 .. fields.len - 1], 0..) |field, i| {
-            if (i == field_index_opt.?) {
-                @field(result, field.name) = switch (@typeInfo(field.type)) {
+                @field(result, field.name) = switch (field_type_info) {
                     else => @compileError(std.fmt.comptimePrint("Unhandled type '{s}'", .{@typeName(field.type)})),
-                    .bool => if (std.mem.eql(u8, token, "true") or std.mem.eql(u8, token, "TRUE"))
+                    .bool => if (invert_boolean)
+                        !@field(result, field.name)
+                    else if (std.mem.eql(u8, token, "true") or std.mem.eql(u8, token, "TRUE"))
                         true
                     else if (std.mem.eql(u8, token, "false") or std.mem.eql(u8, token, "FALSE"))
                         false
@@ -188,8 +188,15 @@ pub fn parse(comptime OptStruct: type, allocator: Allocator, tmp_allocator: Allo
                         return error.InvalidEnumValue;
                     },
                 };
+
+                found = true;
                 break;
             }
+        }
+
+        if (!found) {
+            log.err("Invalid option: '{s}'", .{field_name});
+            return error.InvalidOption;
         }
     }
 
