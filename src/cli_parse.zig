@@ -71,12 +71,15 @@ pub fn parse(comptime OptStruct: type, allocator: Allocator, tmp_allocator: Allo
 
     const opt_info = @typeInfo(OptStruct);
     assert(opt_info == .@"struct");
+    const fields = opt_info.@"struct".fields;
 
     // First argument is exe path
     _ = arg_it.skip();
 
     while (arg_it.next()) |arg| {
         var token = arg;
+        var field_index_opt: ?usize = 0;
+
         const field_name: []const u8 = blk: {
             if (std.mem.startsWith(u8, token, "--")) {
                 var name: []const u8 = undefined;
@@ -91,15 +94,58 @@ pub fn parse(comptime OptStruct: type, allocator: Allocator, tmp_allocator: Allo
 
                 break :blk name;
             } else if (std.mem.startsWith(u8, token, "-")) {
-                unreachable;
+                if (token.len < 2) {
+                    log.err("Invalid short option: '{s}'", .{token});
+                    return error.InvalidShortOption;
+                }
+                const short_name = token[1];
+
+                token = token[2..];
+                if (std.mem.startsWith(u8, token, "=")) {
+                    token = token[1..];
+                }
+
+                var field_name: ?[]const u8 = null;
+                inline for (@field(result, "__short_names"), 0..) |n, i| {
+                    if (short_name == n) {
+                        field_name = fields[i].name;
+                        field_index_opt = i;
+                        break;
+                    }
+                }
+
+                if (field_name == null) {
+                    log.err("Invalid short option: '-{c}'", .{short_name});
+                    return error.InvalidShortOption;
+                }
+
+                break :blk field_name.?;
             }
 
             unreachable;
         };
 
+        if (field_index_opt == null) {
+            var found = false;
+            inline for (fields[0 .. fields.len - 1], 0..) |field, i| {
+                if (std.mem.eql(u8, field_name, field.name)) {
+                    field_index_opt = i;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                log.err("Invalid option name '{s}'", .{field_name});
+                return error.InvalidOptionName;
+            }
+        }
+
         // handle 'name =value', 'name= value', 'name = value'
         if (token.len == 0) {
-            token = arg_it.next() orelse return error.ExpectedValue;
+            token = arg_it.next() orelse {
+                log.err("Expected value after option '{s}'", .{field_name});
+                return error.ExpectedValue;
+            };
 
             if (std.mem.startsWith(u8, token, "=")) {
                 token = token[1..];
@@ -107,92 +153,45 @@ pub fn parse(comptime OptStruct: type, allocator: Allocator, tmp_allocator: Allo
 
             // handle 'name = value'
             if (token.len == 0) {
-                token = arg_it.next() orelse return error.ExpectedValue;
+                token = arg_it.next() orelse {
+                    log.err("Expected value after option '{s}'", .{field_name});
+                    return error.ExpectedValue;
+                };
             }
         }
 
-        log.debug("field_name: '{s}'", .{field_name});
-        log.debug("token: '{s}'", .{token});
-
-        inline for (opt_info.@"struct".fields[0 .. opt_info.@"struct".fields.len - 1]) |field| {
-            if (std.mem.eql(u8, field_name, field.name)) {
+        inline for (fields[0 .. fields.len - 1], 0..) |field, i| {
+            if (i == field_index_opt.?) {
                 @field(result, field.name) = switch (@typeInfo(field.type)) {
                     else => @compileError(std.fmt.comptimePrint("Unhandled type '{s}'", .{@typeName(field.type)})),
-                    .bool => unreachable,
-                    .int => unreachable,
-                    .float => unreachable,
+                    .bool => if (std.mem.eql(u8, token, "true") or std.mem.eql(u8, token, "TRUE"))
+                        true
+                    else if (std.mem.eql(u8, token, "false") or std.mem.eql(u8, token, "FALSE"))
+                        false
+                    else {
+                        log.err("Invalid boolean value: '{s}'", .{token});
+                        return error.InvalidBoolValue;
+                    },
+
+                    .int => std.fmt.parseInt(field.type, token, 10) catch {
+                        log.err("Invalid int value: '{s}'", .{token});
+                        return error.InvalidIntValue;
+                    },
+
+                    .float => std.fmt.parseFloat(field.type, token) catch {
+                        log.err("Invalid float value: '{s}'", .{token});
+                        return error.InvalidFloatValue;
+                    },
+
                     .@"enum" => std.meta.stringToEnum(field.type, token) orelse {
                         log.err("Invalid enum value '{s}'", .{token});
                         return error.InvalidEnumValue;
                     },
                 };
-
                 break;
             }
         }
     }
 
     return result;
-
-    // // Combine all into a single string
-    // var first = true;
-    // var args = std.ArrayList(u8).init(tmp_allocator);
-    // while (arg_it.next()) |arg| {
-    //     if (first) {
-    //         first = false;
-    //     } else {
-    //         try args.append(' ');
-    //     }
-    //     try args.appendSlice(arg);
-    // }
-    //
-    // const opt_info = @typeInfo(OptStruct);
-    // assert(opt_info == .@"struct");
-    //
-    //
-    // // TODO: Don't think we need to tokenize?
-    // var it = std.mem.tokenizeAny(u8, args.items, &std.ascii.whitespace);
-    //
-    // while (it.next()) |token| {
-    //     if (std.mem.startsWith(u8, token, "--")) {
-    //         const name = token[2..];
-    //
-    //         // Last field is __short_names
-    //         inline for (opt_info.@"struct".fields[0 .. opt_info.@"struct".fields.len - 1]) |field| {
-    //             if (std.mem.startsWith(u8, name, field.name)) {
-    //                 log.debug("Matched option: {s}", .{field.name});
-    //
-    //                 const next = if (name.len == field.name.len)
-    //                     it.next() orelse return error.ExpectedValue
-    //                 else
-    //                     name[field.name.len..];
-    //
-    //                 log.debug("next: '{s}'", .{next});
-    //                 var value = if (std.mem.startsWith(u8, next, "="))
-    //                     next[1..]
-    //                 else
-    //                     next;
-    //
-    //                 if (value.len == 0)
-    //                     value = it.next() orelse return error.ExpectedValue;
-    //
-    //                 log.debug("value: '{s}'", .{value});
-    //
-    //                 @field(result, field.name) = switch (@typeInfo(field.type)) {
-    //                     else => @compileError(std.fmt.comptimePrint("Unhandled type '{s}'", .{@typeName(field.type)})),
-    //                     .@"enum" => std.meta.stringToEnum(field.type, value) orelse {
-    //                         log.err("Invalid enum value '{s}'", .{value});
-    //                         return error.InvalidEnumValue;
-    //                     },
-    //                     .bool => unreachable,
-    //                     .int => unreachable,
-    //                     .float => unreachable,
-    //                 };
-    //                 break;
-    //             }
-    //         }
-    //     } else if (std.mem.startsWith(u8, token, "-")) {}
-    // }
-    //
-    // return result;
 }
