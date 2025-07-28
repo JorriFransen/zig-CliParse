@@ -5,21 +5,41 @@ const Allocator = std.mem.Allocator;
 
 const assert = std.debug.assert;
 
+pub const max_name_length = 20;
+const max_type_length = 6;
+
 const Option = struct {
     name: [:0]const u8,
     short: ?u8,
 
     type: type,
+    type_tag: TypeTag,
     default_value_ptr: ?*const anyopaque,
+};
+
+const TypeTag = enum {
+    bool,
+    int,
+    uint,
+    float,
+    string,
+    @"enum",
 };
 
 pub fn option(default: anytype, name: [:0]const u8, short: ?u8) Option {
     const ValueType = @TypeOf(default);
 
+    if (name.len > max_name_length) {
+        @compileError(std.fmt.comptimePrint("Name too long (max {})", .{max_name_length}));
+    }
+
+    const tag = validateType(ValueType);
+
     const result = Option{
         .name = name,
         .short = short,
         .type = ValueType,
+        .type_tag = tag,
         .default_value_ptr = @ptrCast(&default),
     };
 
@@ -27,12 +47,13 @@ pub fn option(default: anytype, name: [:0]const u8, short: ?u8) Option {
 }
 
 pub fn OptionsStruct(comptime options: []const Option) type {
-    const fields: [options.len + 1]std.builtin.Type.StructField = blk: {
-        var _fields: [options.len + 1]std.builtin.Type.StructField = undefined;
+    const fields: [options.len + 2]std.builtin.Type.StructField = blk: {
+        var _fields: [options.len + 2]std.builtin.Type.StructField = undefined;
+
+        var tags: [options.len]TypeTag = undefined;
         var short_names: [options.len]?u8 = undefined;
 
-        inline for (options, _fields[0..options.len], &short_names, 0..) |opt, *field, *sname, i| {
-
+        inline for (options, _fields[0..options.len], &tags, &short_names, 0..) |opt, *field, *tag, *sname, i| {
             // Check for duplicate short name
             if (opt.short) |s| {
                 if (std.mem.indexOfScalar(?u8, short_names[0..i], s)) |dup_i| {
@@ -55,16 +76,8 @@ pub fn OptionsStruct(comptime options: []const Option) type {
                 }
             }
 
-            // Validate type
-            switch (@typeInfo(opt.type)) {
-                else => @compileError(std.fmt.comptimePrint("Type not supported '{s}", .{@typeName(opt.type)})),
-                .bool, .int, .float, .@"enum" => {}, // ok
-                .pointer => |ptr| {
-                    if (ptr.size != .slice or ptr.child != u8 or !ptr.is_const) {
-                        @compileError(std.fmt.comptimePrint("Type not supported '{s}\nUse @as([]const u8, \"...\") for strings.", .{@typeName(opt.type)}));
-                    }
-                },
-            }
+            const otag = validateType(opt.type);
+            assert(otag == opt.type_tag);
 
             field.* = .{
                 .name = opt.name,
@@ -74,10 +87,19 @@ pub fn OptionsStruct(comptime options: []const Option) type {
                 .default_value_ptr = opt.default_value_ptr,
             };
 
+            tag.* = otag;
             sname.* = opt.short;
         }
 
-        _fields[options.len] = .{
+        _fields[_fields.len - 2] = .{
+            .name = "__tags",
+            .type = [options.len]TypeTag,
+            .alignment = @alignOf([options.len]TypeTag),
+            .is_comptime = false,
+            .default_value_ptr = &tags,
+        };
+
+        _fields[_fields.len - 1] = .{
             .name = "__short_names",
             .type = [options.len]?u8,
             .alignment = @alignOf([options.len]?u8),
@@ -94,6 +116,32 @@ pub fn OptionsStruct(comptime options: []const Option) type {
         .decls = &.{},
         .fields = &fields,
     } });
+}
+
+fn validateType(comptime T: type) TypeTag {
+    return switch (@typeInfo(T)) {
+        else => @compileError(std.fmt.comptimePrint("Type not supported '{s}", .{@typeName(T)})),
+
+        .bool => .bool,
+
+        .int => |i| blk: {
+            if (i.signedness == .signed) {
+                break :blk .int;
+            } else break :blk .uint;
+        },
+
+        .float => .float,
+
+        .pointer => |ptr| blk: {
+            if (ptr.size != .slice or ptr.child != u8 or !ptr.is_const) {
+                @compileError(std.fmt.comptimePrint("Type not supported '{s}\nUse @as([]const u8, \"...\") for strings.", .{@typeName(T)}));
+            }
+
+            break :blk .string;
+        },
+
+        .@"enum" => .@"enum",
+    };
 }
 
 pub fn parse(comptime OptStruct: type, allocator: Allocator, tmp_allocator: Allocator) !OptStruct {
@@ -155,15 +203,12 @@ pub fn parse(comptime OptStruct: type, allocator: Allocator, tmp_allocator: Allo
                 log.err("Expected option to start with '--' or '-' got '{s}'", .{token});
                 return error.InvalidOption;
             }
-
-            unreachable;
         };
 
         var found = false;
-        inline for (fields[0 .. fields.len - 1]) |field| {
+        inline for (fields[0 .. fields.len - 2]) |field| {
             if (std.mem.eql(u8, field_name, field.name)) {
                 const field_type_info = @typeInfo(field.type);
-                log.debug("Field name: '{s}' - '{s}'", .{ field_name, field.name });
 
                 var invert_boolean = false;
 
@@ -193,6 +238,10 @@ pub fn parse(comptime OptStruct: type, allocator: Allocator, tmp_allocator: Allo
                             };
                         }
                     }
+                }
+
+                if (field_type_info == .bool and (std.mem.startsWith(u8, token, "--") or std.mem.startsWith(u8, token, "-"))) {
+                    invert_boolean = true;
                 }
 
                 @field(result, field.name) = switch (field_type_info) {
@@ -251,13 +300,38 @@ pub fn parse(comptime OptStruct: type, allocator: Allocator, tmp_allocator: Allo
     return result;
 }
 
-pub fn usage(comptime OptStruct: type) void {
-    // TODO: writer argument
+pub fn usage(comptime OptStruct: type, file: std.fs.File) !void {
+    var buffer: [2048]u8 = undefined;
+    var writer = file.writer(&buffer);
+    const w = &writer.interface;
 
-    log.info("usage: ", .{});
+    try w.print("Usage: v10game [OPTION]...", .{});
+    try w.print("\nOptions\n", .{});
 
     const fields = @typeInfo(OptStruct).@"struct".fields;
-    inline for (fields[0 .. fields.len - 1]) |field| {
-        log.info("  --{s:<20}", .{field.name});
+    const tags = fields[fields.len - 2].defaultValue().?;
+    const short_names = fields[fields.len - 1].defaultValue().?;
+    var name_pad: [max_name_length]u8 = undefined;
+    var type_tag_pad: [max_type_length]u8 = undefined;
+
+    inline for (fields[0 .. fields.len - 2], 0..) |field, i| {
+        try w.print("  ", .{});
+        if (short_names[i]) |s| try w.print("-{c}, ", .{s}) else try w.print("    ", .{});
+
+        padRight(field.name, &name_pad);
+        try w.print("--{s}", .{name_pad});
+
+        padRight(@tagName(tags[i]), &type_tag_pad);
+        try w.print(" {s}", .{type_tag_pad});
+
+        try w.print("\n", .{});
     }
+
+    try w.flush();
+}
+
+fn padRight(str: []const u8, out_buf: []u8) void {
+    assert(str.len <= out_buf.len);
+    @memcpy(out_buf[0..str.len], str);
+    @memset(out_buf[str.len..], ' ');
 }
