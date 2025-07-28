@@ -20,7 +20,7 @@ pub fn option(default: anytype, name: [:0]const u8, short: ?u8) Option {
         .name = name,
         .short = short,
         .type = ValueType,
-        .default_value_ptr = &default,
+        .default_value_ptr = @ptrCast(&default),
     };
 
     return result;
@@ -32,6 +32,8 @@ pub fn OptionsStruct(comptime options: []const Option) type {
         var short_names: [options.len]?u8 = undefined;
 
         inline for (options, _fields[0..options.len], &short_names) |opt, *field, *sname| {
+            // TODO: String type
+            // TODO: Check for invalid types
             field.* = .{
                 .name = opt.name,
                 .type = opt.type,
@@ -161,7 +163,8 @@ pub fn parse(comptime OptStruct: type, allocator: Allocator, tmp_allocator: Allo
                 }
 
                 @field(result, field.name) = switch (field_type_info) {
-                    else => @compileError(std.fmt.comptimePrint("Unhandled type '{s}'", .{@typeName(field.type)})),
+                    else => unreachable,
+
                     .bool => if (invert_boolean)
                         !@field(result, field.name)
                     else if (std.mem.eql(u8, token, "true") or std.mem.eql(u8, token, "TRUE"))
@@ -201,4 +204,15 @@ pub fn parse(comptime OptStruct: type, allocator: Allocator, tmp_allocator: Allo
     }
 
     return result;
+}
+
+pub fn usage(comptime OptStruct: type) void {
+    // TODO: writer argument
+
+    log.info("usage: ", .{});
+
+    const fields = @typeInfo(OptStruct).@"struct".fields;
+    inline for (fields[0 .. fields.len - 1]) |field| {
+        log.info("  --{s:<20}", .{field.name});
+    }
 }
