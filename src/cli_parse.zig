@@ -31,8 +31,31 @@ pub fn OptionsStruct(comptime options: []const Option) type {
         var _fields: [options.len + 1]std.builtin.Type.StructField = undefined;
         var short_names: [options.len]?u8 = undefined;
 
-        // TODO: Check for duplicate names/short names
-        inline for (options, _fields[0..options.len], &short_names) |opt, *field, *sname| {
+        inline for (options, _fields[0..options.len], &short_names, 0..) |opt, *field, *sname, i| {
+
+            // Check for duplicate short name
+            if (opt.short) |s| {
+                if (std.mem.indexOfScalar(?u8, short_names[0..i], s)) |dup_i| {
+                    @compileError(std.fmt.comptimePrint(
+                        "Duplicate short name '{c}' (name '{s}'), duplicate of '{c}' (name '{s}')",
+                        .{ s, opt.name, short_names[dup_i].?, _fields[dup_i].name },
+                    ));
+                }
+            }
+
+            // Check for duplicate name
+            for (_fields[0..i], 0..) |dup_f, dup_i| {
+                if (std.mem.eql(u8, opt.name, dup_f.name)) {
+                    const short = if (opt.short) |s| std.fmt.comptimePrint(" (short '{c}')", .{s}) else "";
+                    const dup_short = if (short_names[dup_i]) |s| std.fmt.comptimePrint(" (short '{c}')", .{s}) else "";
+                    @compileError(std.fmt.comptimePrint(
+                        "Duplicate name '{s}'{s}, duplicate of '{s}'{s}",
+                        .{ opt.name, short, dup_f.name, dup_short },
+                    ));
+                }
+            }
+
+            // Validate type
             switch (@typeInfo(opt.type)) {
                 else => @compileError(std.fmt.comptimePrint("Type not supported '{s}", .{@typeName(opt.type)})),
                 .bool, .int, .float, .@"enum" => {}, // ok
