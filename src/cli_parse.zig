@@ -31,9 +31,18 @@ pub fn OptionsStruct(comptime options: []const Option) type {
         var _fields: [options.len + 1]std.builtin.Type.StructField = undefined;
         var short_names: [options.len]?u8 = undefined;
 
+        // TODO: Check for duplicate names/short names
         inline for (options, _fields[0..options.len], &short_names) |opt, *field, *sname| {
-            // TODO: String type
-            // TODO: Check for invalid types
+            switch (@typeInfo(opt.type)) {
+                else => @compileError(std.fmt.comptimePrint("Type not supported '{s}", .{@typeName(opt.type)})),
+                .bool, .int, .float, .@"enum" => {}, // ok
+                .pointer => |ptr| {
+                    if (ptr.size != .slice or ptr.child != u8 or !ptr.is_const) {
+                        @compileError(std.fmt.comptimePrint("Type not supported '{s}\nUse @as([]const u8, \"...\") for strings.", .{@typeName(opt.type)}));
+                    }
+                },
+            }
+
             field.* = .{
                 .name = opt.name,
                 .type = opt.type,
@@ -65,8 +74,6 @@ pub fn OptionsStruct(comptime options: []const Option) type {
 }
 
 pub fn parse(comptime OptStruct: type, allocator: Allocator, tmp_allocator: Allocator) !OptStruct {
-    _ = allocator;
-
     var result: OptStruct = .{};
 
     var arg_it = std.process.argsWithAllocator(tmp_allocator) catch @panic("OOM");
@@ -121,6 +128,9 @@ pub fn parse(comptime OptStruct: type, allocator: Allocator, tmp_allocator: Allo
                 }
 
                 break :blk field_name.?;
+            } else {
+                log.err("Expected option to start with '--' or '-' got '{s}'", .{token});
+                return error.InvalidOption;
             }
 
             unreachable;
@@ -189,6 +199,18 @@ pub fn parse(comptime OptStruct: type, allocator: Allocator, tmp_allocator: Allo
                     .@"enum" => std.meta.stringToEnum(field.type, token) orelse {
                         log.err("Invalid enum value '{s}'", .{token});
                         return error.InvalidEnumValue;
+                    },
+
+                    .pointer => |ptr| blk: {
+                        assert(ptr.size == .slice);
+                        assert(ptr.child == u8);
+                        assert(ptr.is_const);
+
+                        // TODO: Check if we need to handle quotes on windows?
+                        const string = try allocator.alloc(u8, token.len);
+                        @memcpy(string, token);
+
+                        break :blk string;
                     },
                 };
 
