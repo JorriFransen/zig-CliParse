@@ -1,3 +1,5 @@
+// TODO: Require space or '=' between short name and value. This would enable chaining boolean options (eg. -vp)
+
 const std = @import("std");
 const log = std.log.scoped(.cli_parse);
 
