@@ -6,7 +6,7 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
 pub const max_name_length = 20;
-const max_type_length = 6;
+const max_type_length = 8;
 
 const Option = struct {
     name: [:0]const u8,
@@ -15,6 +15,8 @@ const Option = struct {
     type: type,
     type_tag: TypeTag,
     default_value_ptr: ?*const anyopaque,
+
+    description: ?[]const u8,
 };
 
 const TypeTag = enum {
@@ -26,7 +28,7 @@ const TypeTag = enum {
     @"enum",
 };
 
-pub fn option(default: anytype, name: [:0]const u8, short: ?u8) Option {
+pub fn option(default: anytype, name: [:0]const u8, short: ?u8, description: ?[]const u8) Option {
     const ValueType = @TypeOf(default);
 
     if (name.len > max_name_length) {
@@ -41,6 +43,7 @@ pub fn option(default: anytype, name: [:0]const u8, short: ?u8) Option {
         .type = ValueType,
         .type_tag = tag,
         .default_value_ptr = @ptrCast(&default),
+        .description = description,
     };
 
     return result;
@@ -48,12 +51,12 @@ pub fn option(default: anytype, name: [:0]const u8, short: ?u8) Option {
 
 /// // Example usage
 /// const OptionParser = clip.OptionParser(&.{
-///     clip.option(glfw.Platform.any, "glfw_platform", 'p'),
-///     clip.option(@as(i32, -42), "test_int", 'i'),
-///     clip.option(@as(u32, 42), "test_uint", null),
-///     clip.option(@as(f32, 4.2), "test_float", 'f'),
-///     clip.option(@as([]const u8, "abc"), "test_str", 's'),
-///     clip.option(false, "help", 'h'),
+///     clip.option(glfw.Platform.any, "glfw_platform", 'p', "Specify the platform hint for glfw.\n"),
+///     clip.option(@as(i32, -42), "test_int", 'i', "test integer."),
+///     clip.option(@as(u32, 42), "test_uint", null, null),
+///     clip.option(@as(f32, 4.2), "test_float", 'f', "Some float."),
+///     clip.option(@as([]const u8, "abc"), "test_str", 's', "\n"),
+///     clip.option(false, "help", 'h', "Print this help message and exit."),
 /// });
 ///
 /// const cli_options = OptionParser.parse(mem.common_arena.allocator(), tmp.allocator()) catch { try OptionParser.usage(std.fs.File.stderr());
@@ -317,6 +320,8 @@ pub fn OptionParser(comptime options: []const Option) type {
 
                 padRight(@tagName(opt.type_tag), &type_tag_pad);
                 try w.print(" {s}", .{type_tag_pad});
+
+                if (opt.description) |d| try w.print(" {s}", .{d});
 
                 try w.print("\n", .{});
             }
