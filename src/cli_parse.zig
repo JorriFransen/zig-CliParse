@@ -149,40 +149,36 @@ pub fn parse(comptime OptStruct: type, allocator: Allocator, tmp_allocator: Allo
 
     var arg_it = std.process.argsWithAllocator(tmp_allocator) catch @panic("OOM");
 
+    // First argument is exe path
+    _ = arg_it.skip();
+
+    var tokens = Tokenizer.init(&arg_it);
+
     const opt_info = @typeInfo(OptStruct);
     assert(opt_info == .@"struct");
     const fields = opt_info.@"struct".fields;
 
-    // First argument is exe path
-    _ = arg_it.skip();
-
-    while (arg_it.next()) |arg| {
-        var token = arg;
+    while (!tokens.eof) {
+        var used_short = false;
 
         const field_name: []const u8 = blk: {
-            if (std.mem.startsWith(u8, token, "--")) {
-                var name: []const u8 = undefined;
+            if (tokens.eat("--")) |_| {
+                var name = tokens.current();
 
-                if (std.mem.indexOf(u8, token, "=")) |idx| {
-                    name = token[2..idx];
-                    token = token[idx + 1 ..];
-                } else {
-                    name = token[2..];
-                    token = "";
+                if (std.mem.indexOf(u8, name, "=")) |idx| {
+                    name = name[0..idx];
                 }
+                _ = tokens.eat(name);
 
                 break :blk name;
-            } else if (std.mem.startsWith(u8, token, "-")) {
-                if (token.len < 2) {
-                    log.err("Invalid short option: '{s}'", .{token});
+            } else if (tokens.eat("-")) |_| {
+                const c = tokens.current();
+                if (c.len < 1) {
+                    log.err("Invalid short option: '{s}'", .{c});
                     return error.InvalidShortOption;
                 }
-                const short_name = token[1];
-
-                token = token[2..];
-                if (std.mem.startsWith(u8, token, "=")) {
-                    token = token[1..];
-                }
+                const short_name = c[0];
+                _ = tokens.eat(c[0..1]);
 
                 var field_name: ?[]const u8 = null;
                 // TODO: Move this to the top of the loop below?
@@ -198,9 +194,11 @@ pub fn parse(comptime OptStruct: type, allocator: Allocator, tmp_allocator: Allo
                     return error.InvalidShortOption;
                 }
 
+                used_short = true;
+
                 break :blk field_name.?;
             } else {
-                log.err("Expected option to start with '--' or '-' got '{s}'", .{token});
+                log.err("Expected option to start with '--' or '-' got '{s}'", .{tokens.current()});
                 return error.InvalidOption;
             }
         };
@@ -210,67 +208,67 @@ pub fn parse(comptime OptStruct: type, allocator: Allocator, tmp_allocator: Allo
             if (std.mem.eql(u8, field_name, field.name)) {
                 const field_type_info = @typeInfo(field.type);
 
-                var invert_boolean = false;
-
-                // handle ' value', ' =value', ' = value'
-                blk: {
-                    if (token.len == 0) {
-                        if (arg_it.next()) |n| {
-                            token = n;
-                        } else if (field_type_info == .bool) {
-                            invert_boolean = true;
-                            break :blk;
-                        } else {
-                            log.err("Expected value after option '{s}'", .{field_name});
-                            return error.ExpectedValue;
-                        }
-
-                        // handle ' =value', ' = value'
-                        if (std.mem.startsWith(u8, token, "=")) {
-                            token = token[1..];
-                        }
-
-                        // handle 'name = value'
-                        if (token.len == 0) {
-                            token = arg_it.next() orelse {
-                                log.err("Expected value after option '{s}'", .{field_name});
-                                return error.ExpectedValue;
-                            };
-                        }
-                    }
+                var parsed_eq = false;
+                if (tokens.eat("=")) |_| {
+                    parsed_eq = true;
                 }
 
-                if (field_type_info == .bool and (std.mem.startsWith(u8, token, "--") or std.mem.startsWith(u8, token, "-"))) {
+                if (field_type_info != .bool and !parsed_eq and !used_short) {
+                    log.err("Expect '=' after option '--{s}'", .{field.name});
+                    return error.InvalidOption;
+                }
+
+                var invert_boolean = false;
+
+                if (field_type_info == .bool and
+                    !parsed_eq and
+                    (tokens.eof or
+                        std.mem.startsWith(u8, tokens.current(), "--") or
+                        std.mem.startsWith(u8, tokens.current(), "-")))
+                {
                     invert_boolean = true;
+                }
+
+                const value_token = if (!invert_boolean) tokens.next() else "";
+
+                if (!invert_boolean and value_token.len == 0) {
+                    log.err("Missing value for option '--{s}'", .{field.name});
+                    return error.MissingValue;
                 }
 
                 @field(result, field.name) = switch (field_type_info) {
                     else => unreachable,
 
                     .bool => if (invert_boolean)
-                        !@field(result, field.name)
-                    else if (std.mem.eql(u8, token, "true") or std.mem.eql(u8, token, "TRUE"))
+                        !field.defaultValue().?
+                    else if (std.mem.eql(u8, value_token, "true"))
                         true
-                    else if (std.mem.eql(u8, token, "false") or std.mem.eql(u8, token, "FALSE"))
+                    else if (std.mem.eql(u8, value_token, "TRUE"))
+                        true
+                    else if (std.mem.eql(u8, value_token, "false"))
+                        false
+                    else if (std.mem.eql(u8, value_token, "FALSE"))
                         false
                     else {
-                        log.err("Invalid boolean value: '{s}'", .{token});
+                        log.err("Invalid boolean value: '{s}'", .{value_token});
                         return error.InvalidBoolValue;
                     },
 
-                    .int => std.fmt.parseInt(field.type, token, 10) catch {
-                        log.err("Invalid int value: '{s}'", .{token});
+                    .int => std.fmt.parseInt(field.type, value_token, 10) catch {
+                        log.err("Invalid int value: '{s}'", .{value_token});
                         return error.InvalidIntValue;
                     },
 
-                    .float => std.fmt.parseFloat(field.type, token) catch {
-                        log.err("Invalid float value: '{s}'", .{token});
+                    .float => std.fmt.parseFloat(field.type, value_token) catch {
+                        log.err("Invalid float value: '{s}'", .{value_token});
                         return error.InvalidFloatValue;
                     },
 
-                    .@"enum" => std.meta.stringToEnum(field.type, token) orelse {
-                        log.err("Invalid enum value '{s}'", .{token});
-                        return error.InvalidEnumValue;
+                    .@"enum" => blk: {
+                        break :blk std.meta.stringToEnum(field.type, value_token) orelse {
+                            log.err("Invalid enum value '{s}'", .{value_token});
+                            return error.InvalidEnumValue;
+                        };
                     },
 
                     .pointer => |ptr| blk: {
@@ -279,8 +277,8 @@ pub fn parse(comptime OptStruct: type, allocator: Allocator, tmp_allocator: Allo
                         assert(ptr.is_const);
 
                         // TODO: Check if we need to handle quotes on windows?
-                        const string = try allocator.alloc(u8, token.len);
-                        @memcpy(string, token);
+                        const string = try allocator.alloc(u8, value_token.len);
+                        @memcpy(string, value_token);
 
                         break :blk string;
                     },
@@ -299,6 +297,65 @@ pub fn parse(comptime OptStruct: type, allocator: Allocator, tmp_allocator: Allo
 
     return result;
 }
+
+const Tokenizer = struct {
+    arg_it: *std.process.ArgIterator,
+    current_token: []const u8,
+    eof: bool,
+
+    pub fn init(arg_it: *std.process.ArgIterator) Tokenizer {
+        var ct: []const u8 = "";
+        var eof = false;
+
+        if (arg_it.next()) |c| {
+            ct = c;
+        } else {
+            eof = true;
+        }
+
+        return .{
+            .arg_it = arg_it,
+            .current_token = ct,
+            .eof = eof,
+        };
+    }
+
+    pub fn next(it: *Tokenizer) []const u8 {
+        const result = it.current_token;
+
+        if (it.arg_it.next()) |n| {
+            it.current_token = n;
+        } else {
+            it.current_token = "";
+            it.eof = true;
+        }
+
+        return result;
+    }
+
+    pub fn current(it: *Tokenizer) []const u8 {
+        if (it.current_token.len == 0) {
+            _ = it.next();
+        }
+        return it.current_token;
+    }
+
+    pub fn eat(it: *Tokenizer, str: []const u8) ?[]const u8 {
+        if (it.current_token.len == 0) {
+            _ = it.next();
+        }
+
+        if (std.mem.startsWith(u8, it.current_token, str)) {
+            it.current_token = it.current_token[str.len..];
+            if (it.current_token.len == 0) {
+                _ = it.next();
+            }
+            return str;
+        }
+
+        return null;
+    }
+};
 
 pub fn usage(comptime OptStruct: type, file: std.fs.File) !void {
     var buffer: [2048]u8 = undefined;
