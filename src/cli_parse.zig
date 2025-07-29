@@ -5,7 +5,6 @@ const Allocator = std.mem.Allocator;
 
 const assert = std.debug.assert;
 
-// TODO: Maybe these can be calculated when creating the OptionParser and stored on OptionParser?
 pub const max_name_length = 20;
 const max_type_length = 6;
 
@@ -47,6 +46,43 @@ pub fn option(default: anytype, name: [:0]const u8, short: ?u8) Option {
     return result;
 }
 
+/// // Example usage
+/// const OptionParser = clip.OptionParser(&.{
+///     clip.option(glfw.Platform.any, "glfw_platform", 'p'),
+///     clip.option(@as(i32, -42), "test_int", 'i'),
+///     clip.option(@as(u32, 42), "test_uint", null),
+///     clip.option(@as(f32, 4.2), "test_float", 'f'),
+///     clip.option(@as([]const u8, "abc"), "test_str", 's'),
+///     clip.option(false, "help", 'h'),
+/// });
+///
+/// const cli_options = OptionParser.parse(mem.common_arena.allocator(), tmp.allocator()) catch { try OptionParser.usage(std.fs.File.stderr());
+///     return; // Exit
+/// };
+/// tmp.release();
+///
+/// if (cli_options.help) {
+///     try OptionParser.usage(std.fs.File.stdout());
+///     return; // Exit
+/// }
+///
+/// // The type of cli_options looks like this:
+/// // struct {
+/// //     glfw_platform: glfw.Platform = any,
+/// //     test_int: i32 = -42,
+/// //     test_uint: u32 = 42,
+/// //     test_float: f32 = 4.2,
+/// //     test_str: []const u8 = "abc",
+/// //     help: bool = false,
+/// // };
+/// //
+/// // The parse function inititalizes the result to the default values, so any
+/// //  unset options will have their default value.
+/// // When specifying options by their long name (--option_name) a '=' between
+/// //  the name and value is mandatory.
+/// // When specifying options by their short name (-o) a '=' between the name
+/// // and value is optional. When the option is a boolean the value may be
+/// // omitted,in which case it will be set to the inverse of the default value.
 pub fn OptionParser(comptime options: []const Option) type {
     const Info = struct {
         fields: [options.len]std.builtin.Type.StructField,
@@ -149,7 +185,6 @@ pub fn OptionParser(comptime options: []const Option) type {
                         _ = tokens.eat(c[0..1]);
 
                         var field_name: ?[]const u8 = null;
-                        // TODO: Move this to the top of the loop below?
                         inline for (from_options) |o| {
                             if (short_name == o.short) {
                                 field_name = o.name;
@@ -176,10 +211,7 @@ pub fn OptionParser(comptime options: []const Option) type {
                     if (std.mem.eql(u8, field_name, o.name)) {
                         const field_type_info = @typeInfo(o.type);
 
-                        var parsed_eq = false;
-                        if (tokens.eat("=")) |_| {
-                            parsed_eq = true;
-                        }
+                        const parsed_eq = tokens.eat("=") != null;
 
                         if (field_type_info != .bool and !parsed_eq and !used_short) {
                             log.err("Expect '=' after option '--{s}'", .{o.name});
@@ -244,7 +276,6 @@ pub fn OptionParser(comptime options: []const Option) type {
                                 assert(ptr.child == u8);
                                 assert(ptr.is_const);
 
-                                // TODO: Check if we need to handle quotes on windows?
                                 const string = try allocator.alloc(u8, value_token.len);
                                 @memcpy(string, value_token);
 
