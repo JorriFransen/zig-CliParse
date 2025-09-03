@@ -6,7 +6,7 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
 pub const max_name_length = 20;
-const max_type_length = 8;
+const max_type_length = 10;
 
 const Option = struct {
     name: [:0]const u8,
@@ -14,6 +14,7 @@ const Option = struct {
 
     type: type,
     type_tag: TypeTag,
+    is_array: bool,
     default_value_ptr: ?*const anyopaque,
 
     description: ?[]const u8,
@@ -37,16 +38,34 @@ pub fn option(default: anytype, name: [:0]const u8, short: ?u8, description: ?[]
 
     const tag = validateType(ValueType);
 
-    const result = Option{
+    return .{
         .name = name,
         .short = short,
         .type = ValueType,
         .type_tag = tag,
+        .is_array = false,
         .default_value_ptr = @ptrCast(&default),
         .description = description,
     };
+}
 
-    return result;
+pub fn arrayOption(comptime ElemType: type, name: [:0]const u8, short: ?u8, description: ?[]const u8) Option {
+    if (name.len > max_name_length) {
+        @compileError(std.fmt.comptimePrint("Name too long (max {})", .{max_name_length}));
+    }
+
+    const tag = validateType(ElemType);
+    const default = std.ArrayList(ElemType){};
+
+    return .{
+        .name = name,
+        .short = short,
+        .type = ElemType,
+        .type_tag = tag,
+        .is_array = true,
+        .default_value_ptr = @ptrCast(&default),
+        .description = description,
+    };
 }
 
 /// # Example usage
@@ -56,7 +75,8 @@ pub fn option(default: anytype, name: [:0]const u8, short: ?u8, description: ?[]
 ///     clip.option(@as(i32, -42), "test_int", 'i', "test integer."),
 ///     clip.option(@as(u32, 42), "test_uint", null, null),
 ///     clip.option(@as(f32, 4.2), "test_float", 'f', "Some float."),
-///     clip.option(@as([]const u8, "abc"), "test_str", 's', "\n"),
+///     clip.option(@as([]const u8, "abc"), "test_str", 's', null),
+///     clip.ArrayOption([]const u8, "name", 'n', "Name\n"),
 ///     clip.option(false, "help", 'h', "Print this help message and exit."),
 /// });
 ///
@@ -79,6 +99,7 @@ pub fn option(default: anytype, name: [:0]const u8, short: ?u8, description: ?[]
 ///     test_uint: u32 = 42,
 ///     test_float: f32 = 4.2,
 ///     test_str: []const u8 = "abc",
+///     name: std.ArrayList([]const u8) = std.ArrayList([]const u8){},
 ///     help: bool = false,
 /// };
 /// ```
@@ -90,8 +111,9 @@ pub fn option(default: anytype, name: [:0]const u8, short: ?u8, description: ?[]
 /// When specifying options by their short name (-o) a '=' between the name
 /// and value is optional. When the option is a boolean the value may be
 /// omitted,in which case it will be set to the inverse of the default value.
-pub fn OptionParser(comptime options: []const Option) type {
+pub fn OptionParser(program_name: []const u8, comptime options: []const Option) type {
     const Info = struct {
+        program_name: []const u8,
         fields: [options.len]std.builtin.Type.StructField,
         options: [options.len]Option,
     };
@@ -130,16 +152,17 @@ pub fn OptionParser(comptime options: []const Option) type {
             const otag = validateType(opt.type);
             assert(otag == opt.type_tag);
 
+            const member_type = if (opt.is_array) std.ArrayList(opt.type) else opt.type;
             field.* = .{
                 .name = opt.name,
-                .type = opt.type,
-                .alignment = @alignOf(opt.type),
+                .type = member_type,
+                .alignment = @alignOf(member_type),
                 .is_comptime = false,
                 .default_value_ptr = opt.default_value_ptr,
             };
         }
 
-        break :blk .{ .fields = fields, .options = options_copy };
+        break :blk .{ .program_name = program_name, .fields = fields, .options = options_copy };
     };
 
     const OptionStruct = @Type(.{ .@"struct" = .{
@@ -243,7 +266,7 @@ pub fn OptionParser(comptime options: []const Option) type {
                             return error.MissingValue;
                         }
 
-                        @field(result, o.name) = switch (field_type_info) {
+                        const value = switch (field_type_info) {
                             else => unreachable,
 
                             .bool => if (invert_boolean)
@@ -290,6 +313,12 @@ pub fn OptionParser(comptime options: []const Option) type {
                             },
                         };
 
+                        if (o.is_array) {
+                            try @field(result, o.name).append(allocator, value);
+                        } else {
+                            @field(result, o.name) = value;
+                        }
+
                         found = true;
                         break;
                     }
@@ -309,7 +338,7 @@ pub fn OptionParser(comptime options: []const Option) type {
             var writer = file.writer(&buffer);
             const w = &writer.interface;
 
-            try w.print("Usage: v10game [OPTION]...", .{});
+            try w.print("Usage: {s} [OPTION]...", .{info.program_name});
             try w.print("\nOptions\n", .{});
 
             var name_pad: [max_name_length]u8 = undefined;
@@ -322,7 +351,13 @@ pub fn OptionParser(comptime options: []const Option) type {
                 padRight(opt.name, &name_pad);
                 try w.print("--{s}", .{name_pad});
 
-                padRight(@tagName(opt.type_tag), &type_tag_pad);
+                if (opt.is_array) {
+                    type_tag_pad[0] = '[';
+                    type_tag_pad[1] = ']';
+                    padRight(@tagName(opt.type_tag), type_tag_pad[2..]);
+                } else {
+                    padRight(@tagName(opt.type_tag), &type_tag_pad);
+                }
                 try w.print(" {s}", .{type_tag_pad});
 
                 if (opt.description) |d| try w.print(" {s}", .{d});

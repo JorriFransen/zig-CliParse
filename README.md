@@ -8,7 +8,8 @@ const OptionParser = clip.OptionParser(&.{
     clip.option(@as(i32, -42), "test_int", 'i', "test integer."),
     clip.option(@as(u32, 42), "test_uint", null, null),
     clip.option(@as(f32, 4.2), "test_float", 'f', "Some float."),
-    clip.option(@as([]const u8, "abc"), "test_str", 's', "\n"),
+    clip.option(@as([]const u8, "abc"), "test_str", 's', null),
+    clip.ArrayOption([]const u8, "name", 'n', "Name\n"),
     clip.option(false, "help", 'h', "Print this help message and exit."),
 });
 
@@ -31,6 +32,7 @@ struct {
     test_uint: u32 = 42,
     test_float: f32 = 4.2,
     test_str: []const u8 = "abc",
+    name: std.ArrayList([]const u8) = std.ArrayList([]const u8){},
     help: bool = false,
 };
 ```
