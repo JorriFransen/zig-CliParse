@@ -114,15 +114,19 @@ pub fn arrayOption(comptime ElemType: type, name: [:0]const u8, short: ?u8, desc
 pub fn OptionParser(program_name: []const u8, comptime options: []const Option) type {
     const Info = struct {
         program_name: []const u8,
-        fields: [options.len]std.builtin.Type.StructField,
+        field_names: [options.len][]const u8,
+        field_types: [options.len]type,
+        field_attrs: [options.len]std.builtin.Type.StructField.Attributes,
         options: [options.len]Option,
     };
 
     const info: Info = blk: {
-        var fields: [options.len]std.builtin.Type.StructField = undefined;
+        var field_names: [options.len][]const u8 = undefined;
+        var field_types: [options.len]type = undefined;
+        var field_attrs: [options.len]std.builtin.Type.StructField.Attributes = undefined;
         var options_copy: [options.len]Option = undefined;
 
-        inline for (options, &fields, &options_copy, 0..) |opt, *field, *oc, i| {
+        inline for (options, &field_names, &field_types, &field_attrs, &options_copy, 0..) |opt, *fname, *ftype, *fattr, *oc, i| {
             oc.* = opt;
 
             // Check for duplicate short name
@@ -138,13 +142,13 @@ pub fn OptionParser(program_name: []const u8, comptime options: []const Option) 
             }
 
             // Check for duplicate name
-            for (fields[0..i], options[0..i]) |dup_f, o| {
-                if (std.mem.eql(u8, opt.name, dup_f.name)) {
+            for (field_names[0..i], options[0..i]) |dup_f_name, o| {
+                if (std.mem.eql(u8, opt.name, dup_f_name)) {
                     const short = if (opt.short) |s| std.fmt.comptimePrint(" (short '{c}')", .{s}) else "";
                     const dup_short = if (o.short) |s| std.fmt.comptimePrint(" (short '{c}')", .{s}) else "";
                     @compileError(std.fmt.comptimePrint(
                         "Duplicate name '{s}'{s}, duplicate of '{s}'{s}",
-                        .{ opt.name, short, dup_f.name, dup_short },
+                        .{ opt.name, short, dup_f_name, dup_short },
                     ));
                 }
             }
@@ -152,25 +156,21 @@ pub fn OptionParser(program_name: []const u8, comptime options: []const Option) 
             const otag = validateType(opt.type);
             assert(otag == opt.type_tag);
 
-            const member_type = if (opt.is_array) std.ArrayList(opt.type) else opt.type;
-            field.* = .{
-                .name = opt.name,
-                .type = member_type,
-                .alignment = @alignOf(member_type),
-                .is_comptime = false,
-                .default_value_ptr = opt.default_value_ptr,
-            };
+            fname.* = opt.name;
+            ftype.* = if (opt.is_array) std.ArrayList(opt.type) else opt.type;
+            fattr.* = .{ .default_value_ptr = opt.default_value_ptr };
         }
 
-        break :blk .{ .program_name = program_name, .fields = fields, .options = options_copy };
+        break :blk .{
+            .program_name = program_name,
+            .field_names = field_names,
+            .field_types = field_types,
+            .field_attrs = field_attrs,
+            .options = options_copy,
+        };
     };
 
-    const OptionStruct = @Type(.{ .@"struct" = .{
-        .layout = .auto,
-        .is_tuple = false,
-        .decls = &.{},
-        .fields = &info.fields,
-    } });
+    const OptionStruct = @Struct(.auto, null, &info.field_names, &info.field_types, &info.field_attrs);
 
     return struct {
         /// Result of the parse operation, struct containing all option fields
@@ -179,10 +179,10 @@ pub fn OptionParser(program_name: []const u8, comptime options: []const Option) 
         /// Original options passed into OptionParser()
         pub const from_options = info.options;
 
-        pub fn parse(allocator: Allocator, tmp_allocator: Allocator) !Options {
+        pub fn parse(args: std.process.Args, allocator: Allocator, tmp_allocator: Allocator) !Options {
             var result: Options = .{};
 
-            var arg_it = std.process.argsWithAllocator(tmp_allocator) catch @panic("OOM");
+            var arg_it = args.iterateAllocator(tmp_allocator) catch @panic("OOM");
 
             // First argument is exe path
             _ = arg_it.skip();
@@ -333,9 +333,7 @@ pub fn OptionParser(program_name: []const u8, comptime options: []const Option) 
             return result;
         }
 
-        pub fn usage(file: std.fs.File) !void {
-            var buffer: [2048]u8 = undefined;
-            var writer = file.writer(&buffer);
+        pub fn usage(writer: *std.Io.File.Writer) !void {
             const w = &writer.interface;
 
             try w.print("Usage: {s} [OPTION]...", .{info.program_name});
@@ -397,11 +395,11 @@ fn validateType(comptime T: type) TypeTag {
 }
 
 const Tokenizer = struct {
-    arg_it: *std.process.ArgIterator,
+    arg_it: *std.process.Args.Iterator,
     current_token: []const u8,
     eof: bool,
 
-    pub fn init(arg_it: *std.process.ArgIterator) Tokenizer {
+    pub fn init(arg_it: *std.process.Args.Iterator) Tokenizer {
         var ct: []const u8 = "";
         var eof = false;
 
