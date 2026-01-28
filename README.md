@@ -13,13 +13,14 @@ const OptionParser = clip.OptionParser(&.{
     clip.option(false, "help", 'h', "Print this help message and exit."),
 });
 
-const cli_options = OptionParser.parse(mem.common_arena.allocator(), tmp.allocator()) catch { try OptionParser.usage(std.fs.File.stderr());
+const cli_options = OptionParser.parse(mem.common_arena.allocator(), tmp.allocator()) catch {
+    try OptionParser.usage(stderr_writer);
     return; // Exit
 };
 tmp.release();
 
 if (cli_options.help) {
-    try OptionParser.usage(std.fs.File.stdout());
+    try OptionParser.usage(stdout_writer);
     return; // Exit
 }
 ```
