@@ -80,13 +80,14 @@ pub fn arrayOption(comptime ElemType: type, name: [:0]const u8, short: ?u8, desc
 ///     clip.option(false, "help", 'h', "Print this help message and exit."),
 /// });
 ///
-/// const cli_options = OptionParser.parse(mem.common_arena.allocator(), tmp.allocator()) catch { try OptionParser.usage(std.fs.File.stderr());
+/// const cli_options = OptionParser.parse(mem.common_arena.allocator(), tmp.allocator()) catch {
+///     try OptionParser.usage(stderr_writer);
 ///     return; // Exit
 /// };
 /// tmp.release();
 ///
 /// if (cli_options.help) {
-///     try OptionParser.usage(std.fs.File.stdout());
+///     try OptionParser.usage(stdout_writer);
 ///     return; // Exit
 /// }
 /// ```
@@ -179,6 +180,27 @@ pub fn OptionParser(program_name: []const u8, comptime options: []const Option) 
         /// Original options passed into OptionParser()
         pub const from_options = info.options;
 
+        pub fn freeOptions(o: *Options, allocator: Allocator) void {
+            _ = .{ o, allocator };
+
+            const o_info = @typeInfo(Options);
+            assert(o_info == .@"struct");
+            assert(o_info.@"struct".fields.len == from_options.len);
+
+            inline for (from_options, o_info.@"struct".fields) |oo, field_info| {
+                if (!oo.is_array) {
+                    if (oo.type_tag == .string) allocator.free(@field(o, field_info.name));
+                } else {
+                    const arraylist = &@field(o, field_info.name);
+
+                    if (oo.type_tag == .string) for (arraylist.items) |s| allocator.free(s);
+
+                    arraylist.deinit(allocator);
+                }
+            }
+        }
+
+        // TODO: Handle duplicate non array options (disallow or overwrite and free previous)
         pub fn parse(args: std.process.Args, allocator: Allocator, tmp_allocator: Allocator) !Options {
             var result: Options = .{};
 
@@ -333,21 +355,19 @@ pub fn OptionParser(program_name: []const u8, comptime options: []const Option) 
             return result;
         }
 
-        pub fn usage(writer: *std.Io.File.Writer) !void {
-            const w = &writer.interface;
-
-            try w.print("Usage: {s} [OPTION]...", .{info.program_name});
-            try w.print("\nOptions\n", .{});
+        pub fn usage(writer: *std.Io.Writer) !void {
+            try writer.print("Usage: {s} [OPTION]...", .{info.program_name});
+            try writer.print("\nOptions\n", .{});
 
             var name_pad: [max_name_length]u8 = undefined;
             var type_tag_pad: [max_type_length]u8 = undefined;
 
             inline for (from_options) |opt| {
-                try w.print("  ", .{});
-                if (opt.short) |s| try w.print("-{c}, ", .{s}) else try w.print("    ", .{});
+                try writer.print("  ", .{});
+                if (opt.short) |s| try writer.print("-{c}, ", .{s}) else try writer.print("    ", .{});
 
                 padRight(opt.name, &name_pad);
-                try w.print("--{s}", .{name_pad});
+                try writer.print("--{s}", .{name_pad});
 
                 if (opt.is_array) {
                     type_tag_pad[0] = '[';
@@ -356,14 +376,12 @@ pub fn OptionParser(program_name: []const u8, comptime options: []const Option) 
                 } else {
                     padRight(@tagName(opt.type_tag), &type_tag_pad);
                 }
-                try w.print(" {s}", .{type_tag_pad});
+                try writer.print(" {s}", .{type_tag_pad});
 
-                if (opt.description) |d| try w.print(" {s}", .{d});
+                if (opt.description) |d| try writer.print(" {s}", .{d});
 
-                try w.print("\n", .{});
+                try writer.print("\n", .{});
             }
-
-            try w.flush();
         }
     };
 }
